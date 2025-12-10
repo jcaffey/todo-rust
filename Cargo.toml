@@ -9,3 +9,5 @@ toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 dirs = "5.0"
 colored = "2.1"
+ratatui = "0.28"
+crossterm = "0.28"
