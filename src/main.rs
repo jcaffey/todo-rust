@@ -15,13 +15,14 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Parser)]
 #[command(name = "todo")]
-#[command(about = "A simple todo list manager", long_about = None)]
+#[command(about = "A simple todo list manager")]
+#[command(long_about = "A simple todo list manager\n\nYou can also pipe text directly to add todos to the active list:\n  echo \"New todo\" | todo\n  printf \"Todo 1\\nTodo 2\" | todo")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -808,8 +809,24 @@ fn main() {
     // Ensure active list file exists
     ensure_active_list_exists(&active_list_path);
 
-    // Parse CLI arguments
+    // Parse CLI arguments first to check if user provided any commands
     let cli = Cli::parse();
+
+    // Check if there's piped input AND no subcommand was provided
+    let stdin = io::stdin();
+    if cli.command.is_none() && !stdin.is_terminal() {
+        // Read from stdin
+        let reader = BufReader::new(stdin);
+        for line in reader.lines() {
+            if let Ok(todo_text) = line {
+                let trimmed = todo_text.trim();
+                if !trimmed.is_empty() {
+                    add_todo(&config, trimmed.to_string(), None);
+                }
+            }
+        }
+        return;
+    }
 
     match &cli.command {
         Some(Commands::Lists) => {
