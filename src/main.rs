@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
+use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -17,6 +18,12 @@ struct Cli {
 enum Commands {
     /// List all todo files
     Lists,
+    /// List todos from the active list or a specified list
+    List {
+        /// Optional list to display (defaults to active list)
+        #[arg(short, long)]
+        list: Option<String>,
+    },
     /// Switch to a different todo list
     Use { list_name: String },
     /// Add a todo to the active list or specified list
@@ -256,6 +263,116 @@ fn edit_list(config: &Config) {
     }
 }
 
+fn display_todo_list(config: &Config, target_list: Option<String>) {
+    let todo_path = expand_tilde(&config.todo.path);
+
+    // Determine which list to display
+    let (list_path, list_name) = if let Some(list_name) = target_list {
+        // Extract just the name without extension if provided
+        let list_name = if list_name.contains('.') {
+            list_name.split('.').next().unwrap().to_string()
+        } else {
+            list_name
+        };
+        let file_name = format!("{}.{}", list_name, config.todo.list_extension);
+        let path = todo_path.join(&file_name);
+        (path, file_name)
+    } else {
+        // Use active list
+        let path = get_active_list_path(config, &todo_path);
+        let file_name = format!("{}.{}", config.todo.active_list, config.todo.list_extension);
+        (path, file_name)
+    };
+
+    // Check if the list exists
+    if !list_path.exists() {
+        eprintln!("List '{}' does not exist", list_name);
+        return;
+    }
+
+    // Display header
+    println!("{}", format!("=== {} ===", list_name).bold().cyan());
+    println!();
+
+    // Read and parse the file
+    match fs::File::open(&list_path) {
+        Ok(file) => {
+            let reader = BufReader::new(file);
+            let mut incomplete_count = 0;
+            let mut complete_count = 0;
+            let mut has_todos = false;
+
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    let trimmed = line.trim();
+
+                    // Parse incomplete todos: * [ ] text
+                    if trimmed.starts_with("* [ ]") {
+                        has_todos = true;
+                        incomplete_count += 1;
+                        let todo_text = trimmed.strip_prefix("* [ ]").unwrap_or("").trim();
+                        println!("{} {}", "☐".bright_yellow(), todo_text);
+                    }
+                    // Parse complete todos: * [x] text
+                    else if trimmed.starts_with("* [x]") || trimmed.starts_with("* [X]") {
+                        has_todos = true;
+                        complete_count += 1;
+                        let todo_text = trimmed.strip_prefix("* [x]")
+                            .or_else(|| trimmed.strip_prefix("* [X]"))
+                            .unwrap_or("")
+                            .trim();
+                        println!("{} {}", "☑".green(), todo_text.strikethrough().dimmed());
+                    }
+                    // Handle other adoc formatting
+                    else if trimmed.starts_with("= ") {
+                        // Level 1 header
+                        let header = trimmed.strip_prefix("= ").unwrap_or(trimmed);
+                        println!("{}", header.bold().bright_cyan());
+                    }
+                    else if trimmed.starts_with("== ") {
+                        // Level 2 header
+                        let header = trimmed.strip_prefix("== ").unwrap_or(trimmed);
+                        println!("{}", header.bold().cyan());
+                    }
+                    else if trimmed.starts_with("=== ") {
+                        // Level 3 header
+                        let header = trimmed.strip_prefix("=== ").unwrap_or(trimmed);
+                        println!("{}", header.bold().blue());
+                    }
+                    else if trimmed.starts_with("* ") && !trimmed.starts_with("* [") {
+                        // Regular bullet point
+                        let text = trimmed.strip_prefix("* ").unwrap_or(trimmed);
+                        println!("  {} {}", "•".bright_white(), text);
+                    }
+                    else if !trimmed.is_empty() {
+                        // Regular text
+                        println!("{}", trimmed);
+                    }
+                    else {
+                        // Empty line
+                        println!();
+                    }
+                }
+            }
+
+            if !has_todos {
+                println!("{}", "No todos found.".dimmed());
+            } else {
+                println!();
+                println!(
+                    "{} {} incomplete, {} complete",
+                    "Summary:".bold(),
+                    incomplete_count.to_string().bright_yellow(),
+                    complete_count.to_string().green()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("Error reading todo list: {}", e);
+        }
+    }
+}
+
 fn main() {
     // Ensure config exists and load it
     let mut config = ensure_config_exists();
@@ -275,6 +392,9 @@ fn main() {
     match &cli.command {
         Some(Commands::Lists) => {
             list_todos(&config);
+        }
+        Some(Commands::List { list }) => {
+            display_todo_list(&config, list.clone());
         }
         Some(Commands::Use { list_name }) => {
             use_list(&mut config, list_name.clone());
