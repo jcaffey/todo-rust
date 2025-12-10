@@ -118,6 +118,11 @@ struct App {
     selected: usize,
     list_path: PathBuf,
     list_name: String,
+    pending_deletes: Vec<usize>,
+    undo_stack: Vec<usize>,
+    edit_mode: bool,
+    edit_text: String,
+    edit_insert_position: Option<usize>,
 }
 
 impl App {
@@ -129,6 +134,11 @@ impl App {
             selected,
             list_path,
             list_name,
+            pending_deletes: Vec::new(),
+            undo_stack: Vec::new(),
+            edit_mode: false,
+            edit_text: String::new(),
+            edit_insert_position: None,
         })
     }
 
@@ -214,7 +224,12 @@ impl App {
     fn save_todos(&self) -> io::Result<()> {
         let mut content = String::new();
 
-        for item in &self.items {
+        for (idx, item) in self.items.iter().enumerate() {
+            // Skip items that are marked for deletion
+            if self.pending_deletes.contains(&idx) {
+                continue;
+            }
+
             let line = match item.line_type {
                 LineType::Todo => {
                     if item.completed {
@@ -245,7 +260,9 @@ impl App {
         let start = self.selected;
         loop {
             self.selected = (self.selected + 1) % self.items.len();
-            if matches!(self.items[self.selected].line_type, LineType::Todo) || self.selected == start {
+            if (matches!(self.items[self.selected].line_type, LineType::Todo)
+                && !self.pending_deletes.contains(&self.selected))
+                || self.selected == start {
                 break;
             }
         }
@@ -263,7 +280,9 @@ impl App {
             } else {
                 self.selected - 1
             };
-            if matches!(self.items[self.selected].line_type, LineType::Todo) || self.selected == start {
+            if (matches!(self.items[self.selected].line_type, LineType::Todo)
+                && !self.pending_deletes.contains(&self.selected))
+                || self.selected == start {
                 break;
             }
         }
@@ -272,14 +291,16 @@ impl App {
     fn goto_top(&mut self) {
         self.selected = self.items
             .iter()
-            .position(|item| matches!(item.line_type, LineType::Todo))
+            .enumerate()
+            .position(|(idx, item)| matches!(item.line_type, LineType::Todo) && !self.pending_deletes.contains(&idx))
             .unwrap_or(0);
     }
 
     fn goto_bottom(&mut self) {
         self.selected = self.items
             .iter()
-            .rposition(|item| matches!(item.line_type, LineType::Todo))
+            .enumerate()
+            .rposition(|(idx, item)| matches!(item.line_type, LineType::Todo) && !self.pending_deletes.contains(&idx))
             .unwrap_or(self.items.len().saturating_sub(1));
     }
 
@@ -291,12 +312,105 @@ impl App {
         }
     }
 
+    fn delete_current(&mut self) {
+        if self.selected < self.items.len() {
+            if matches!(self.items[self.selected].line_type, LineType::Todo) {
+                // Add to pending deletes if not already there
+                if !self.pending_deletes.contains(&self.selected) {
+                    self.pending_deletes.push(self.selected);
+                    self.undo_stack.push(self.selected);
+
+                    // Move to next non-deleted todo
+                    self.next();
+                }
+            }
+        }
+    }
+
+    fn undo_delete(&mut self) {
+        if let Some(idx) = self.undo_stack.pop() {
+            // Remove from pending deletes
+            if let Some(pos) = self.pending_deletes.iter().position(|&x| x == idx) {
+                self.pending_deletes.remove(pos);
+                // Move selection to the restored item
+                self.selected = idx;
+            }
+        }
+    }
+
+    fn start_insert_above(&mut self) {
+        self.edit_mode = true;
+        self.edit_text = String::new();
+        self.edit_insert_position = Some(self.selected);
+    }
+
+    fn start_insert_below(&mut self) {
+        self.edit_mode = true;
+        self.edit_text = String::new();
+        self.edit_insert_position = Some(self.selected + 1);
+    }
+
+    fn finish_edit(&mut self) {
+        if self.edit_mode {
+            self.edit_mode = false;
+
+            // Only insert if there's text
+            if !self.edit_text.trim().is_empty() {
+                let new_item = TodoItem {
+                    text: self.edit_text.trim().to_string(),
+                    completed: false,
+                    line_type: LineType::Todo,
+                };
+
+                if let Some(pos) = self.edit_insert_position {
+                    // Insert at the specified position
+                    let insert_pos = pos.min(self.items.len());
+                    self.items.insert(insert_pos, new_item);
+
+                    // Update pending_deletes indices (shift indices >= insert_pos by 1)
+                    for idx in &mut self.pending_deletes {
+                        if *idx >= insert_pos {
+                            *idx += 1;
+                        }
+                    }
+
+                    // Update undo_stack indices
+                    for idx in &mut self.undo_stack {
+                        if *idx >= insert_pos {
+                            *idx += 1;
+                        }
+                    }
+
+                    // Move selection to the new item
+                    self.selected = insert_pos;
+                }
+            }
+
+            self.edit_text.clear();
+            self.edit_insert_position = None;
+        }
+    }
+
+    fn handle_char_input(&mut self, c: char) {
+        if self.edit_mode {
+            self.edit_text.push(c);
+        }
+    }
+
+    fn handle_backspace(&mut self) {
+        if self.edit_mode && !self.edit_text.is_empty() {
+            self.edit_text.pop();
+        }
+    }
+
     fn count_todos(&self) -> (usize, usize) {
         let incomplete = self.items.iter()
-            .filter(|item| matches!(item.line_type, LineType::Todo) && !item.completed)
+            .enumerate()
+            .filter(|(idx, item)| matches!(item.line_type, LineType::Todo) && !item.completed && !self.pending_deletes.contains(idx))
             .count();
         let complete = self.items.iter()
-            .filter(|item| matches!(item.line_type, LineType::Todo) && item.completed)
+            .enumerate()
+            .filter(|(idx, item)| matches!(item.line_type, LineType::Todo) && item.completed && !self.pending_deletes.contains(idx))
             .count();
         (incomplete, complete)
     }
@@ -688,14 +802,26 @@ fn show_fireworks() -> io::Result<()> {
 }
 
 fn ui(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),  // Title
-            Constraint::Min(0),     // Content
-            Constraint::Length(3),  // Status bar
-        ])
-        .split(f.area());
+    let chunks = if app.edit_mode {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),  // Title
+                Constraint::Min(0),     // Content
+                Constraint::Length(3),  // Input field
+                Constraint::Length(3),  // Status bar
+            ])
+            .split(f.area())
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),  // Title
+                Constraint::Min(0),     // Content
+                Constraint::Length(3),  // Status bar
+            ])
+            .split(f.area())
+    };
 
     // Title
     let title = Paragraph::new(format!("  {} ", app.list_name))
@@ -717,9 +843,21 @@ fn ui(f: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, todo_item)| {
+            let is_pending_delete = app.pending_deletes.contains(&i);
+
             let content = match todo_item.line_type {
                 LineType::Todo => {
-                    if todo_item.completed {
+                    if is_pending_delete {
+                        Line::from(vec![
+                            Span::styled("✗ ", Style::default().fg(Color::Red)),
+                            Span::styled(
+                                &todo_item.text,
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::CROSSED_OUT | Modifier::DIM),
+                            ),
+                        ])
+                    } else if todo_item.completed {
                         Line::from(vec![
                             Span::styled("☑ ", Style::default().fg(Color::Green)),
                             Span::styled(
@@ -793,18 +931,39 @@ fn ui(f: &mut Frame, app: &App) {
 
     f.render_widget(list, chunks[1]);
 
+    // Input field (only shown in edit mode)
+    if app.edit_mode {
+        let input = Paragraph::new(format!("  {}▋", app.edit_text))
+            .style(Style::default().fg(Color::Yellow))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(" New Todo ")
+            );
+        f.render_widget(input, chunks[2]);
+    }
+
     // Status bar
     let (incomplete, complete) = app.count_todos();
-    let status_text = format!(
-        " {} incomplete  {} complete  │  [j/k] move  [Space/Enter] toggle  [g/G] top/bottom  [q] quit ",
-        incomplete, complete
-    );
+    let status_text = if app.edit_mode {
+        format!(
+            " {} incomplete  {} complete  │  Type todo text  │  [ESC] save  [q] quit ",
+            incomplete, complete
+        )
+    } else {
+        format!(
+            " {} incomplete  {} complete  │  [j/k] move  [Space/Enter] toggle  [d] delete  [u] undo  [o/O] insert  [g/G] top/bottom  [q] quit ",
+            incomplete, complete
+        )
+    };
 
     let status = Paragraph::new(status_text)
         .style(Style::default().fg(Color::White).bg(Color::Rgb(40, 40, 60)))
         .block(Block::default());
 
-    f.render_widget(status, chunks[2]);
+    let status_idx = if app.edit_mode { 3 } else { 2 };
+    f.render_widget(status, chunks[status_idx]);
 }
 
 fn run_app<B: ratatui::backend::Backend>(
@@ -816,16 +975,30 @@ fn run_app<B: ratatui::backend::Backend>(
 
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char('q') => {
-                        app.save_todos()?;
-                        return Ok(());
+                if app.edit_mode {
+                    // Handle keys in edit mode
+                    match key.code {
+                        KeyCode::Esc => app.finish_edit(),
+                        KeyCode::Char(c) => app.handle_char_input(c),
+                        KeyCode::Backspace => app.handle_backspace(),
+                        _ => {}
                     }
-                    KeyCode::Char('j') | KeyCode::Down => app.next(),
-                    KeyCode::Char('k') | KeyCode::Up => app.previous(),
-                    KeyCode::Char('g') => app.goto_top(),
-                    KeyCode::Char('G') => app.goto_bottom(),
-                    KeyCode::Char(' ') | KeyCode::Enter => {
+                } else {
+                    // Handle keys in normal mode
+                    match key.code {
+                        KeyCode::Char('q') => {
+                            app.save_todos()?;
+                            return Ok(());
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => app.next(),
+                        KeyCode::Char('k') | KeyCode::Up => app.previous(),
+                        KeyCode::Char('g') => app.goto_top(),
+                        KeyCode::Char('G') => app.goto_bottom(),
+                        KeyCode::Char('d') => app.delete_current(),
+                        KeyCode::Char('u') => app.undo_delete(),
+                        KeyCode::Char('O') => app.start_insert_above(),
+                        KeyCode::Char('o') => app.start_insert_below(),
+                        KeyCode::Char(' ') | KeyCode::Enter => {
                         // Check if we had incomplete todos before toggle
                         let had_incomplete = app.items.iter()
                             .any(|item| matches!(item.line_type, LineType::Todo) && !item.completed);
@@ -861,8 +1034,9 @@ fn run_app<B: ratatui::backend::Backend>(
                                 EnableMouseCapture
                             )?;
                         }
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
