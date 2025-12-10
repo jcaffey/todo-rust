@@ -123,6 +123,8 @@ struct App {
     edit_mode: bool,
     edit_text: String,
     edit_insert_position: Option<usize>,
+    edit_original_text: Option<String>,
+    edit_existing_index: Option<usize>,
 }
 
 impl App {
@@ -139,6 +141,8 @@ impl App {
             edit_mode: false,
             edit_text: String::new(),
             edit_insert_position: None,
+            edit_original_text: None,
+            edit_existing_index: None,
         })
     }
 
@@ -342,27 +346,49 @@ impl App {
         self.edit_mode = true;
         self.edit_text = String::new();
         self.edit_insert_position = Some(self.selected);
+        self.edit_original_text = None;
+        self.edit_existing_index = None;
     }
 
     fn start_insert_below(&mut self) {
         self.edit_mode = true;
         self.edit_text = String::new();
         self.edit_insert_position = Some(self.selected + 1);
+        self.edit_original_text = None;
+        self.edit_existing_index = None;
+    }
+
+    fn start_edit_current(&mut self) {
+        if self.selected < self.items.len() {
+            if matches!(self.items[self.selected].line_type, LineType::Todo) {
+                self.edit_mode = true;
+                self.edit_text = self.items[self.selected].text.clone();
+                self.edit_original_text = Some(self.items[self.selected].text.clone());
+                self.edit_existing_index = Some(self.selected);
+                self.edit_insert_position = None;
+            }
+        }
     }
 
     fn finish_edit(&mut self) {
         if self.edit_mode {
             self.edit_mode = false;
 
-            // Only insert if there's text
-            if !self.edit_text.trim().is_empty() {
-                let new_item = TodoItem {
-                    text: self.edit_text.trim().to_string(),
-                    completed: false,
-                    line_type: LineType::Todo,
-                };
+            // Check if we're editing an existing todo
+            if let Some(idx) = self.edit_existing_index {
+                // Update existing todo
+                if !self.edit_text.trim().is_empty() && idx < self.items.len() {
+                    self.items[idx].text = self.edit_text.trim().to_string();
+                }
+            } else if let Some(pos) = self.edit_insert_position {
+                // Insert new todo (only if there's text)
+                if !self.edit_text.trim().is_empty() {
+                    let new_item = TodoItem {
+                        text: self.edit_text.trim().to_string(),
+                        completed: false,
+                        line_type: LineType::Todo,
+                    };
 
-                if let Some(pos) = self.edit_insert_position {
                     // Insert at the specified position
                     let insert_pos = pos.min(self.items.len());
                     self.items.insert(insert_pos, new_item);
@@ -388,6 +414,29 @@ impl App {
 
             self.edit_text.clear();
             self.edit_insert_position = None;
+            self.edit_original_text = None;
+            self.edit_existing_index = None;
+        }
+    }
+
+    fn cancel_edit(&mut self) {
+        if self.edit_mode {
+            self.edit_mode = false;
+
+            // If editing an existing todo, restore original text
+            if let Some(idx) = self.edit_existing_index {
+                if let Some(original) = &self.edit_original_text {
+                    if idx < self.items.len() {
+                        self.items[idx].text = original.clone();
+                    }
+                }
+            }
+            // If inserting a new todo, just discard it (do nothing)
+
+            self.edit_text.clear();
+            self.edit_insert_position = None;
+            self.edit_original_text = None;
+            self.edit_existing_index = None;
         }
     }
 
@@ -933,13 +982,18 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Input field (only shown in edit mode)
     if app.edit_mode {
+        let title = if app.edit_existing_index.is_some() {
+            " Edit Todo "
+        } else {
+            " New Todo "
+        };
         let input = Paragraph::new(format!("  {}▋", app.edit_text))
             .style(Style::default().fg(Color::Yellow))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Yellow))
-                    .title(" New Todo ")
+                    .title(title)
             );
         f.render_widget(input, chunks[2]);
     }
@@ -948,12 +1002,12 @@ fn ui(f: &mut Frame, app: &App) {
     let (incomplete, complete) = app.count_todos();
     let status_text = if app.edit_mode {
         format!(
-            " {} incomplete  {} complete  │  Type todo text  │  [ESC] save  [q] quit ",
+            " {} incomplete  {} complete  │  Type todo text  │  [Enter] save  [ESC] cancel ",
             incomplete, complete
         )
     } else {
         format!(
-            " {} incomplete  {} complete  │  [j/k] move  [Space/Enter] toggle  [d] delete  [u] undo  [o/O] insert  [g/G] top/bottom  [q] quit ",
+            " {} incomplete  {} complete  │  [j/k] move  [Space] toggle  [e/Enter] edit  [d] delete  [u] undo  [o/O] insert  [g/G] top/bottom  [q] quit ",
             incomplete, complete
         )
     };
@@ -978,7 +1032,8 @@ fn run_app<B: ratatui::backend::Backend>(
                 if app.edit_mode {
                     // Handle keys in edit mode
                     match key.code {
-                        KeyCode::Esc => app.finish_edit(),
+                        KeyCode::Enter => app.finish_edit(),
+                        KeyCode::Esc => app.cancel_edit(),
                         KeyCode::Char(c) => app.handle_char_input(c),
                         KeyCode::Backspace => app.handle_backspace(),
                         _ => {}
@@ -998,7 +1053,8 @@ fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Char('u') => app.undo_delete(),
                         KeyCode::Char('O') => app.start_insert_above(),
                         KeyCode::Char('o') => app.start_insert_below(),
-                        KeyCode::Char(' ') | KeyCode::Enter => {
+                        KeyCode::Char('e') | KeyCode::Enter => app.start_edit_current(),
+                        KeyCode::Char(' ') => {
                         // Check if we had incomplete todos before toggle
                         let had_incomplete = app.items.iter()
                             .any(|item| matches!(item.line_type, LineType::Todo) && !item.completed);
