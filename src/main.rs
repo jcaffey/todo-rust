@@ -1,9 +1,10 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use crossterm::{
+    cursor,
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, Clear, ClearType},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -18,6 +19,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "todo")]
@@ -601,6 +604,89 @@ fn display_todo_list(config: &Config, target_list: Option<String>) {
     }
 }
 
+fn show_fireworks() -> io::Result<()> {
+    let mut stdout = io::stdout();
+
+    // Clear screen
+    execute!(stdout, Clear(ClearType::All), cursor::Hide)?;
+
+    // Fireworks explosion patterns
+    let explosion_frames = vec![
+        vec!["        *        ", "       ***       ", "      *****      ", "     *******     ", "    *********    "],
+        vec!["    *       *    ", "   **       **   ", "  ***       ***  ", " ****       **** ", "*****       *****"],
+        vec!["  *           *  ", " * *         * * ", "*   *       *   *", " *   *     *   * ", "  *   *   *   *  "],
+        vec![" *             * ", "*               *", "                 ", "*               *", " *             * "],
+    ];
+
+    let colors = vec![
+        "\x1b[91m", // Bright red
+        "\x1b[93m", // Bright yellow
+        "\x1b[92m", // Bright green
+        "\x1b[96m", // Bright cyan
+        "\x1b[95m", // Bright magenta
+    ];
+    let reset = "\x1b[0m";
+
+    // Show celebration message
+    execute!(stdout, cursor::MoveTo(0, 0))?;
+    let msg = "🎉  ALL TODOS COMPLETE!  🎉";
+    let padding = (80_u16.saturating_sub(msg.len() as u16)) / 2;
+    execute!(stdout, cursor::MoveTo(padding, 2))?;
+    write!(stdout, "{}", msg.bright_green().bold())?;
+    stdout.flush()?;
+
+    // Animate fireworks at different positions
+    let positions = vec![(10, 8), (50, 6), (30, 10), (60, 12), (20, 14)];
+
+    for round in 0..3 {
+        for (frame_idx, frame) in explosion_frames.iter().enumerate() {
+            execute!(stdout, cursor::MoveTo(0, 4))?;
+
+            // Draw all fireworks
+            for (pos_idx, &(x, y)) in positions.iter().enumerate() {
+                let color = colors[pos_idx % colors.len()];
+
+                // Only show this firework if it's time
+                if (round * positions.len() + pos_idx) / 2 <= frame_idx {
+                    for (i, line) in frame.iter().enumerate() {
+                        execute!(stdout, cursor::MoveTo(x, y + i as u16))?;
+                        write!(stdout, "{}{}{}", color, line, reset)?;
+                    }
+                }
+            }
+
+            stdout.flush()?;
+            thread::sleep(Duration::from_millis(150));
+
+            // Clear fireworks for next frame
+            for &(x, y) in &positions {
+                for i in 0..5 {
+                    execute!(stdout, cursor::MoveTo(x, y + i))?;
+                    write!(stdout, "                 ")?;
+                }
+            }
+        }
+    }
+
+    // Final message
+    execute!(stdout, cursor::MoveTo(0, 20))?;
+    let final_msg = "Press any key to continue...";
+    let padding = (80_u16.saturating_sub(final_msg.len() as u16)) / 2;
+    execute!(stdout, cursor::MoveTo(padding, 20))?;
+    write!(stdout, "{}", final_msg.dimmed())?;
+    stdout.flush()?;
+
+    // Wait for key press
+    loop {
+        if let Event::Key(_) = event::read()? {
+            break;
+        }
+    }
+
+    execute!(stdout, Clear(ClearType::All), cursor::Show)?;
+    Ok(())
+}
+
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -739,7 +825,43 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('k') | KeyCode::Up => app.previous(),
                     KeyCode::Char('g') => app.goto_top(),
                     KeyCode::Char('G') => app.goto_bottom(),
-                    KeyCode::Char(' ') | KeyCode::Enter => app.toggle_current(),
+                    KeyCode::Char(' ') | KeyCode::Enter => {
+                        // Check if we had incomplete todos before toggle
+                        let had_incomplete = app.items.iter()
+                            .any(|item| matches!(item.line_type, LineType::Todo) && !item.completed);
+
+                        app.toggle_current();
+
+                        // Check if all todos are now complete
+                        let all_complete = app.items.iter()
+                            .filter(|item| matches!(item.line_type, LineType::Todo))
+                            .all(|item| item.completed);
+
+                        // If we just completed the last todo, show fireworks!
+                        if had_incomplete && all_complete && app.items.iter().any(|item| matches!(item.line_type, LineType::Todo)) {
+                            app.save_todos()?;
+
+                            // Temporarily exit the TUI
+                            disable_raw_mode()?;
+                            let mut stdout = io::stdout();
+                            execute!(
+                                stdout,
+                                LeaveAlternateScreen,
+                                DisableMouseCapture
+                            )?;
+
+                            // Show fireworks
+                            show_fireworks()?;
+
+                            // Re-enter the TUI
+                            enable_raw_mode()?;
+                            execute!(
+                                stdout,
+                                EnterAlternateScreen,
+                                EnableMouseCapture
+                            )?;
+                        }
+                    }
                     _ => {}
                 }
             }
