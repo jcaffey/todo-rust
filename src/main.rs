@@ -8,10 +8,10 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
@@ -125,6 +125,7 @@ struct App {
     edit_insert_position: Option<usize>,
     edit_original_text: Option<String>,
     edit_existing_index: Option<usize>,
+    show_help: bool,
 }
 
 impl App {
@@ -143,6 +144,7 @@ impl App {
             edit_insert_position: None,
             edit_original_text: None,
             edit_existing_index: None,
+            show_help: false,
         })
     }
 
@@ -450,6 +452,10 @@ impl App {
         if self.edit_mode && !self.edit_text.is_empty() {
             self.edit_text.pop();
         }
+    }
+
+    fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
     }
 
     fn count_todos(&self) -> (usize, usize) {
@@ -1007,7 +1013,7 @@ fn ui(f: &mut Frame, app: &App) {
         )
     } else {
         format!(
-            " {} incomplete  {} complete  │  [j/k] move  [Space] toggle  [e/Enter] edit  [d] delete  [u] undo  [o/O] insert  [g/G] top/bottom  [q] quit ",
+            " {} incomplete  {} complete  │  [j/k] move  [Space] toggle  [e/Enter] edit  [d] delete  [u] undo  [o/O] insert  [?] help  [q] quit ",
             incomplete, complete
         )
     };
@@ -1018,6 +1024,83 @@ fn ui(f: &mut Frame, app: &App) {
 
     let status_idx = if app.edit_mode { 3 } else { 2 };
     f.render_widget(status, chunks[status_idx]);
+
+    // Help dialog overlay
+    if app.show_help {
+        let help_text = vec![
+            Line::from(vec![
+                Span::styled("Todo TUI Help", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Navigation", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from("  j / ↓      Move down to next todo"),
+            Line::from("  k / ↑      Move up to previous todo"),
+            Line::from("  g          Go to first todo"),
+            Line::from("  G          Go to last todo"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Editing", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from("  e / Enter  Edit current todo"),
+            Line::from("  o          Insert new todo below current line"),
+            Line::from("  O          Insert new todo above current line"),
+            Line::from("  d          Delete current todo (held in memory)"),
+            Line::from("  u          Undo last delete"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("In Edit Mode", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from("  Enter      Save changes"),
+            Line::from("  ESC        Cancel (discard new todo or restore original)"),
+            Line::from("  Backspace  Delete character"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Actions", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from("  Space      Toggle todo completion"),
+            Line::from("  q          Save and quit"),
+            Line::from("  ?          Toggle this help"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Examples", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from("  • Press 'o' to add a new todo below"),
+            Line::from("  • Press 'd' to mark for deletion (not saved until quit)"),
+            Line::from("  • Press 'e' to edit, type new text, then Enter to save"),
+            Line::from("  • Press Space to mark a todo as complete"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Press any key to close", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+            ]),
+        ];
+
+        // Create a centered popup
+        let area = f.area();
+        let popup_width = 70.min(area.width.saturating_sub(4));
+        let popup_height = 36.min(area.height.saturating_sub(4));
+
+        let popup_area = Rect {
+            x: (area.width.saturating_sub(popup_width)) / 2,
+            y: (area.height.saturating_sub(popup_height)) / 2,
+            width: popup_width,
+            height: popup_height,
+        };
+
+        let help_paragraph = Paragraph::new(help_text)
+            .style(Style::default().fg(Color::White))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(" Help - Press any key to close ")
+                    .title_alignment(Alignment::Center)
+            )
+            .wrap(Wrap { trim: false });
+
+        f.render_widget(help_paragraph, popup_area);
+    }
 }
 
 fn run_app<B: ratatui::backend::Backend>(
@@ -1029,7 +1112,10 @@ fn run_app<B: ratatui::backend::Backend>(
 
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
-                if app.edit_mode {
+                // If help is showing, any key closes it
+                if app.show_help {
+                    app.toggle_help();
+                } else if app.edit_mode {
                     // Handle keys in edit mode
                     match key.code {
                         KeyCode::Enter => app.finish_edit(),
@@ -1041,6 +1127,7 @@ fn run_app<B: ratatui::backend::Backend>(
                 } else {
                     // Handle keys in normal mode
                     match key.code {
+                        KeyCode::Char('?') => app.toggle_help(),
                         KeyCode::Char('q') => {
                             app.save_todos()?;
                             return Ok(());
