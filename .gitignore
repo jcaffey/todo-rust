@@ -1,2 +1,5 @@
 target/**
+
+# ignore result symlink and the result build dir
+result
 result/**
