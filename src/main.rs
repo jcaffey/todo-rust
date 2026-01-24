@@ -25,7 +25,10 @@ use std::time::Duration;
 #[derive(Parser)]
 #[command(name = "todo")]
 #[command(about = "A simple todo list manager")]
-#[command(long_about = "A simple todo list manager\n\nYou can also pipe text directly to add todos to the active list:\n  echo \"New todo\" | todo\n  printf \"Todo 1\\nTodo 2\" | todo")]
+#[command(long_about = r#"
+    A simple todo list manager
+    You can also pipe text directly to add todos to the active list: echo 'new item' | todo"#
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -33,22 +36,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List all todo files
-    Lists,
-    /// List todos from the active list or a specified list
-    List {
-        /// Optional list to display (defaults to active list)
-        #[arg(short, long)]
-        list: Option<String>,
-    },
-    /// Show interactive TUI to manage todos
-    Show {
-        /// Optional list to display (defaults to active list)
-        #[arg(short, long)]
-        list: Option<String>,
-    },
-    /// Switch to a different todo list
-    Use { list_name: String },
     /// Add a todo to the active list or specified list
     Add {
         /// The todo text to add
@@ -59,6 +46,23 @@ enum Commands {
     },
     /// Open the active list in the configured editor
     Edit,
+    Info,
+    /// List todos from the active list or a specified list
+    List {
+        /// Optional list to display (defaults to active list)
+        #[arg(short, long)]
+        list: Option<String>,
+    },
+    /// List all todo files
+    Lists,
+    /// Show interactive TUI to manage todos
+    Show {
+        /// Optional list to display (defaults to active list)
+        #[arg(short, long)]
+        list: Option<String>,
+    },
+    /// Switch to a different todo list
+    Use { list_name: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -456,6 +460,43 @@ impl App {
 
     fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+    }
+
+    fn save_and_apply_changes(&mut self) -> io::Result<()> {
+        // Save to disk (this already skips pending_deletes)
+        self.save_todos()?;
+
+        // If there were pending deletes, reload from disk to get clean state
+        if !self.pending_deletes.is_empty() {
+            // Reload items from disk
+            self.items = Self::load_todos(&self.list_path)?;
+
+            // Clear pending deletes and undo stack since they're now persisted
+            self.pending_deletes.clear();
+            self.undo_stack.clear();
+
+            // Adjust selected index if needed
+            if !self.items.is_empty() {
+                // Find next valid todo item
+                self.selected = self.items
+                    .iter()
+                    .enumerate()
+                    .position(|(idx, item)| {
+                        matches!(item.line_type, LineType::Todo) && idx >= self.selected
+                    })
+                    .or_else(|| {
+                        // If no todo at or after current position, find first todo
+                        self.items
+                            .iter()
+                            .position(|item| matches!(item.line_type, LineType::Todo))
+                    })
+                    .unwrap_or(0);
+            } else {
+                self.selected = 0;
+            }
+        }
+
+        Ok(())
     }
 
     fn count_todos(&self) -> (usize, usize) {
@@ -1013,7 +1054,7 @@ fn ui(f: &mut Frame, app: &App) {
         )
     } else {
         format!(
-            " {} incomplete  {} complete  │  [j/k] move  [Space] toggle  [e/Enter] edit  [d] delete  [u] undo  [o/O] insert  [?] help  [q] quit ",
+            " {} incomplete  {} complete  │  [j/k] move  [Space] toggle  [e/Enter] edit  [d] delete  [u] undo  [o/O] insert  [s] save  [?] help  [q] quit ",
             incomplete, complete
         )
     };
@@ -1060,6 +1101,7 @@ fn ui(f: &mut Frame, app: &App) {
                 Span::styled("Actions", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ]),
             Line::from("  Space      Toggle todo completion"),
+            Line::from("  s          Save changes to disk (persists deletions)"),
             Line::from("  q          Save and quit"),
             Line::from("  ?          Toggle this help"),
             Line::from(""),
@@ -1067,9 +1109,10 @@ fn ui(f: &mut Frame, app: &App) {
                 Span::styled("Examples", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             ]),
             Line::from("  • Press 'o' to add a new todo below"),
-            Line::from("  • Press 'd' to mark for deletion (not saved until quit)"),
+            Line::from("  • Press 'd' to mark for deletion, 's' to persist to disk"),
             Line::from("  • Press 'e' to edit, type new text, then Enter to save"),
             Line::from("  • Press Space to mark a todo as complete"),
+            Line::from("  • Press 's' anytime to save all changes without quitting"),
             Line::from(""),
             Line::from(vec![
                 Span::styled("Press any key to close", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
@@ -1079,7 +1122,7 @@ fn ui(f: &mut Frame, app: &App) {
         // Create a centered popup
         let area = f.area();
         let popup_width = 70.min(area.width.saturating_sub(4));
-        let popup_height = 36.min(area.height.saturating_sub(4));
+        let popup_height = 38.min(area.height.saturating_sub(4));
 
         let popup_area = Rect {
             x: (area.width.saturating_sub(popup_width)) / 2,
@@ -1128,6 +1171,9 @@ fn run_app<B: ratatui::backend::Backend>(
                     // Handle keys in normal mode
                     match key.code {
                         KeyCode::Char('?') => app.toggle_help(),
+                        KeyCode::Char('s') => {
+                            app.save_and_apply_changes()?;
+                        }
                         KeyCode::Char('q') => {
                             app.save_todos()?;
                             return Ok(());
@@ -1288,9 +1334,14 @@ fn main() {
         Some(Commands::Edit) => {
             edit_list(&config);
         }
-        None => {
+        Some(Commands::Info) => {
             println!("Active list: {}.{}", config.todo.active_list, config.todo.list_extension);
             println!("Use --help to see available commands");
+        }
+        None => {
+            if let Err(e) = show_tui(&config, None) {
+                eprintln!("Error running TUI: {}", e);
+            }
         }
     }
 }
